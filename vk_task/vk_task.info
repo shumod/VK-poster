@@ -1,0 +1,4 @@
+name = VK task work
+description = Возможно добавлять задачи
+core = 7.x
+package = Custom

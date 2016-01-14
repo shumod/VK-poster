@@ -1,0 +1,278 @@
+﻿<?php
+
+class Model_Vk {
+
+  private $url = "https://api.vk.com/method/";
+  private $user_id;
+  private $access_token;
+
+  /**
+  * Конструктор
+  */
+  public function __construct() {
+    global $user;
+    $user = user_load($user->uid);
+    $user_wrapper = entity_metadata_wrapper('user', $user);
+    $this->user_id = $user_wrapper->field_user_id->value();
+    $this->access_token = $user_wrapper->field_token->value();
+  }
+
+  /**
+   * Делает запрос к Api VK
+   * @param $method
+   * @param $params
+   */
+  public function method($method, $params = null) {
+
+    $params['access_token'] = $this->access_token;
+    $build_url = url($this->url . $method);
+    $query = drupal_http_build_query($params);
+    $options = array(
+      'method' => 'POST',
+      'data' => $query,
+      'timeout' => 15,
+      'headers' => array('Content-Type' => 'application/x-www-form-urlencoded'),
+    );
+    $result = drupal_http_request($build_url, $options);
+    //dsm($result);
+    $decode = json_decode($result->data);
+
+    return $decode;
+
+  }
+
+  /**
+   * Получает id группы и сохраняет посты в базу данных
+   * @param $group_id
+   * @param $count
+   */
+  public function get_posts_from_group_and_save_to_db($group_id, $count = 100) {
+    $group_id = ($group_id > 0) ? (0 - $group_id) : $group_id; //получаем id группы
+    
+    //формируем массив параметров для получения количества постов
+    $params_for_count = array(
+      'owner_id' => $group_id,
+      'count' => 1,
+    );
+    $posts = $this->method('wall.get', $params_for_count); //получаем количество постов
+    $posts_count = $posts->response[0];
+
+    //будем делать столько циклов
+    $loops = ceil($posts_count / $count);
+    for($i = 0; $i < $loops; $i++){
+    //for($i = 0; $i < 1; $i++){
+	    $params = array(
+	      'owner_id' => $group_id,
+	      'count' => $count,
+	      'offset' => $count * $i,
+	    );
+	    $operations[] = array('batch_get_posts', array($params));
+    }
+    $batch = $this->set_batch($operations, 'Обновление списка постов');
+
+  }
+
+  /**
+   * Получает декодированный массив из json и выбирает массив со случайным постом. Формирует из него массив параметров
+   * @param $group_from
+   * @param $count
+   */
+  public function set_batch($operations, $title) {
+	$batch = array(
+		'operations' => $operations,
+		'finished' => 'batch_get_posts_finished',
+		'title' => $title,
+		'init_message' => 'Подготовка данных',
+		'progress_message' => 'Выполнено @current из @total.',
+		'error_message' => 'Произошла ошибка.',
+	);	
+    batch_set($batch);  	
+  }
+
+  /**
+   * Получает декодированный массив из json и выбирает массив со случайным постом. Формирует из него массив параметров
+   * @param $group_from
+   * @param $count
+   */
+  public function get_random_posts_from_db($group_from, $count = 100) {
+	$count_posts_from_db = db_select('vk_group_posts', 'vgp')
+	  ->condition('vgp.ownerid', $group_from)
+	  ->condition('vgp.is_publish', 0) //не опубликовано
+	  ->countQuery()
+	  ->execute()
+	  ->fetchField();
+
+    if($count_posts_from_db > 0){
+      $total_count = ($count > $count_posts_from_db) ? $count_posts_from_db : $count;
+      $posts = db_select('vk_group_posts', 'vgp')
+      	->fields('vgp', array('pid', 'ownerid', 'postid', 'message', 'attachments'))
+      	->condition('vgp.is_publish', 0)
+      	->range(0, $total_count)
+      	->orderRandom()
+      	->execute()
+      	->fetchAll();
+    }
+    return $posts;
+  }
+
+  /**
+   * Создаёт строку аттачментов из приложенного массива
+   * @param $attachments_array
+   */
+  public function create_content_from_response_array($response_array) {
+	  
+  	  //какие типы будем добавлять в базу данных
+	  $types = array(
+	    'photo' => 'pid',
+	    'video' => 'vid',
+	    'audio' => 'aid',
+	  );
+
+	  $attachments_array = array();
+	  if(isset($response_array->attachments)) {
+	    foreach ($response_array->attachments as $attachment) {
+	      $type = $attachment->type;
+	      if(array_key_exists($type, $types)) {
+	      	$entity = $attachment->{$type};
+	      	$attachments_array[] = $type . $entity->owner_id . '_' . $entity->{$types[$type]};
+	      }
+	    }
+	  }
+
+	  $output = array();
+
+	  $output['attachments'] = (sizeof($attachments_array) > 0) ? implode(',', $attachments_array) : '';
+	  $output['message'] = ($response_array->text != '') ? $response_array->text : '';
+
+	  return $output; //кодируем в json для записи в бд
+  }
+
+  /**
+   * Отдаёт дату последнего отложенного поста
+   * @param $group_id
+   */
+  public function get_last_postponded_date($group_id) {
+	$postponded = $this->method('wall.get', array('owner_id' => $group_id, 'filter' => 'postponed'));
+	$last_date = ($postponded->response[0] == 0) ? time() : array_pop($postponded->response)->date;
+	
+	return $last_date;
+  }
+
+  /**
+   * Отдаёт массив с расписаниями для того, чтобы их запостить
+   * @param $group_id
+   * @param $posts_count
+   * @param $node
+   */
+  public function get_schedule($group_id, $posts_count, $node) {
+  	$schedule = array();
+
+  	$last_date = $this->get_last_postponded_date($group_id);
+    
+    $schedule_node_id = field_get_items('node', $node, 'field_raspisanie');
+    if(isset($schedule_node_id[0])){
+      $schedule_node = node_load($schedule_node_id[0]['nid']);
+
+      $schedule_items = field_get_items('node', $schedule_node, 'field_time');
+
+      $schedule_items_count = sizeof($schedule_items);
+      $loops = ceil($posts_count / $schedule_items_count);
+      for($i = 0; $i < $loops; $i++) {
+        $seconds_in_day = 60 * 60 * 24;
+        $current_time = $last_date + ($seconds_in_day * $i); //получаем время текущего цикла
+        $current_start_day_time = strtotime(date('d.m.Y', $current_time));
+
+        foreach ($schedule_items as $item) {
+          $item_time = $current_start_day_time + $item['value'];
+          $schedule[] = ($item_time > $current_time) ? $item_time : $item_time + $seconds_in_day;
+        }
+      }
+    }
+    else{
+      drupal_set_message('Нужно добавить расписание! Без этого не получится!', 'error');
+    }
+	
+	return $schedule;
+  }
+
+  /**
+   * Отдаёт массив с расписаниями для того, чтобы их запостить
+   * @param $posts
+   * @param $schedule
+   */
+  public function post_with_schedule($posts, $schedule, $group_post_to) {
+  	$posts_count = sizeof($posts);
+  	for ($i = 0; $i < $posts_count; $i++) { 
+  	  $params = array(
+  	  	'owner_id' => $group_post_to,
+  	  	'publish_date' => $schedule[$i],
+  	  );
+  	  $post_vk_id = $posts[$i]->ownerid . '_' . $posts[$i]->postid;
+  	  $pid = $posts[$i]->pid;
+  	  
+  	  if($posts[$i]->attachments != ''){
+  	  	$params['attachments'] = $posts[$i]->attachments;
+  	  }
+  	  if($posts[$i]->message != ''){
+  	  	$params['message'] = urldecode($posts[$i]->message);
+  	  }
+
+  	  $operations[] = array('batch_post', array($params, $pid, $post_vk_id));
+  	}
+  	$this->set_batch($operations, 'Постим в группу ВК');
+  }
+
+}
+
+//функция для отработки внутри батча
+function batch_get_posts($params, &$context){
+	$vk = new Model_Vk();
+	$params['message'] = '123';
+	$method = $vk->method('wall.get', $params);
+	$ownerid = $params['owner_id'];
+
+	//записываем в базу данных
+	foreach ($method->response as $key => $response) {
+	  $posts = array();
+	  if($key != 0){
+	  	$content = $vk->create_content_from_response_array($response);
+		db_merge('vk_group_posts')
+		  ->key(array('ownerid' => $ownerid, 'postid' => $response->id))
+		  ->fields(array(
+		    'ownerid' => $ownerid,
+		    'postid' => $response->id,
+		    'message' => urlencode($content['message']),
+		    'attachments' => $content['attachments'],
+		  ))
+		  ->execute();
+	  }
+	}
+	$context['results'][] = 'good' . time();
+}
+
+function batch_post($params, $pid, $post_vk_id, &$context) {
+	$vk = new Model_Vk();
+	$wallget = $vk->method('wall.getById', array('posts' => $post_vk_id));
+	$message = $wallget->response[0]->text;
+	if($message != '') { $params['message'] = str_replace("<br>", "\n", $message); }
+	$wallpost = $vk->method('wall.post', $params);
+
+	$post_id = (isset($wallpost->response->post_id)) ? $wallpost->response->post_id : 0;
+	if($post_id != 0) {
+	  db_update('vk_group_posts')
+	    ->fields(array('is_publish' => 1, ))
+	    ->condition('pid', $pid)
+	    ->execute();
+	  $context['results'][] = 'good ' . $pid;
+	}
+	else {
+	  $context['results'][] = "bad $pid" . $wallpost->error->error_msg;
+	}
+	sleep(1);
+}
+
+//результаты запуска батча
+function batch_get_posts_finished($success, $results, $operations){
+	dsm('batch fin');
+	dsm($results);
+}

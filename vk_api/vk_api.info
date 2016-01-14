@@ -1,0 +1,4 @@
+name = VK api
+description = Классы для работы с api ВКонтакте
+core = 7.x
+package = Custom

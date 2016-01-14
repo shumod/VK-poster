@@ -1,0 +1,251 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function vkoa_menu() {
+  $items = array();
+
+  //создадим форму настроек модуля в админке
+  $items['admin/config/vkoa'] = array(
+    'title' => 'Конфигурация для ВК open api',
+    'position' => 'left',
+    'weight' => -100,
+    'page callback' => 'system_admin_menu_block_page',
+    'access arguments' => array('administer site configuration'),
+    'file' => 'system.admin.inc',
+    'file path' => drupal_get_path('module', 'system'),
+  );
+
+  $items['admin/config/vkoa/configuration'] = array(
+    'title' => 'Конфигурация приложения',
+    'description' => 'Пишем сюда номер приложения и ключи',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('vkoa_config_form'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'vkoa.admin.inc',
+  );
+ 
+  $items['user/%user/token'] = array(
+    'title' => t('Get token'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('vkoa_form', 1),
+    'access callback' => 'user_access',
+    'access arguments' => array('access content'),
+    'type' => MENU_LOCAL_TASK,
+    'file' => 'vkoa.gettoken.inc',
+  );
+
+  $items['vkoa'] = array(
+    'title' => t('Get token'),
+    'page callback' => 'vkoa_callback',
+    'access callback' => 'user_access',
+    'access arguments' => array('access content'),
+  );
+
+  $items['vkoa/groups'] = array(
+    'title' => t('My groups'),
+    'page callback' => 'vkoa_groups_callback',
+    'access callback' => 'user_access',
+    'access arguments' => array('access content'),
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  $items['vkoa/user'] = array(
+    'title' => t('User'),
+    'page callback' => 'vkoa_user_callback',
+    'access callback' => 'user_access',
+    'access arguments' => array('access content'),
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  return $items;
+}
+
+function vkoa_callback() {
+  return 'Тут делаются запросы к апи';
+}
+
+function vkoa_groups_callback() {
+  $output = '';
+
+  global $user;
+  $user = user_load($user->uid);
+  $user_wrapper = entity_metadata_wrapper('user', $user);
+  $user_id = $user_wrapper->field_user_id->value();
+  $token = $user_wrapper->field_token->value();
+
+  if($user_id){
+    $path = 'https://api.vk.com/method/';
+    $method = 'wall.get';
+    $data = array(
+      'owner_id' => '-79887792',
+      'count' => 100,
+      'offset' => 5,
+      //'user_id' => $user_id,
+      'access_token' => $token,
+    );
+    $query = drupal_get_query_parameters($data);
+    $url = url($path . $method, array('query' => $query));
+    dsm($url);
+    dsm(_decode($url));
+  }
+  else{
+    $output = 'Сохраните токен для пользователя ' . l('тут!', 'user/'.$user->uid.'/token');
+  }
+  //$result = _decode();
+  return $output;
+}
+
+function vkoa_user_callback() {
+  return 'user';
+}
+
+function _decode($url) {
+  $options = array(
+    'method' => 'GET',
+    'timeout' => 15,
+    'headers' => array('Content-Type' => 'application/x-www-form-urlencoded'),
+  );
+  $result = drupal_http_request($url, $options);
+
+  $decode = json_decode($result->data);
+
+  return $decode;
+}
+
+
+/**
+ * Implements hook_block_info().
+ */
+function vkoa_block_info() {
+  $blocks['post-vk'] = array(
+    'info' => t('Post to VK'),
+  );
+  return $blocks;
+}
+
+/**
+ * Implements hook_block_view().
+ * Генерация заголовка блока и его контента.
+ */
+function vkoa_block_view($delta = '') {
+  $block = array();
+ 
+  if ($delta == 'post-vk') {
+    $block['subject'] = t('Обновить таблицу с постами этого сообщества');
+    $block['content'] = drupal_get_form('vkoa_post_form');
+  }
+ 
+  return $block;
+}
+
+function vkoa_post_form($form, &$form_state) {
+  $form = array();
+
+  $form['refresh-post-table'] = array(
+    '#type' => 'submit',
+    '#value' => 'Обновить таблицу с постами',
+  );
+
+  $form['br'] = array(
+    '#markup' => '<br><br>',
+  );
+
+  $form['count-posts-to-vk'] = array(
+    '#type' => 'textfield',
+    '#default_value' => 1,
+    '#size' => 20,
+    '#prefix' => 'Сколько записей запостить в группу: '
+  );
+  $form['post-to-vk'] = array(
+    '#type' => 'submit',
+    '#value' => 'Запостить отложенных записей в ВК',
+  );
+
+  $form['test'] = array(
+    '#type' => 'submit',
+    '#value' => 'Test',
+  );
+
+  return $form;
+}
+
+function vkoa_post_form_submit($form, &$form_state) {
+  $node = node_load(arg(1));
+  $group_from_id = $node->field_post_from['und'][0]['value'];
+  $group_to_id = $node->field_post_to['und'][0]['value'];
+  $vk = new Model_Vk();
+  if($form_state['triggering_element']['#id'] == 'edit-refresh-post-table') {
+
+    //получаем посты из группы и сохраняем их в базу данных
+    $group_posts = $vk->get_posts_from_group_and_save_to_db($group_from_id);
+  }
+  else if($form_state['triggering_element']['#id'] == 'edit-post-to-vk'){
+    $posts_count = $form_state['values']['count-posts-to-vk'];
+
+    //получаем случайных постов из базы данных
+    $random_posts = $vk->get_random_posts_from_db($group_from_id, $posts_count);
+
+    //получаем расписание для наших постов
+    $schedule = $vk->get_schedule($group_to_id, $posts_count, $node);
+
+    $post = $vk->post_with_schedule($random_posts, $schedule, $group_to_id);
+  }
+  else if($form_state['triggering_element']['#id'] == 'edit-test'){
+    $wallget = $vk->method('wall.get', array('owner_id' => -79887792, 'count' => 100));
+    dsm($wallget);
+  }
+
+}
+
+//получает id группы и отдаёт 20 последних постов из этой группы
+function _get_posts_from_group($group_id) {
+  $group_id = ($group_id > 0) ? (0 - $group_id) : $group_id;
+  $method = 'wall.get';
+  $data = array(
+    'owner_id' => $group_id,
+  );
+  $url = _url($method, $data);
+  $decode = _decode($url);
+  
+  return $decode;
+}
+
+//получает id группы и массив с постами. выбирает 1 пост и постит его
+function _post_to_group($group_id, $posts = array()) {
+  $group_id = ($group_id > 0) ? (0 - $group_id) : $group_id;
+  $sizeofposts = sizeof($posts) - 1;
+  $random_post = rand(1, $sizeofposts);
+
+  $method = 'wall.post';
+  $data = array(
+    'owner_id' => $group_id,
+    'from_group' => 1,
+    'message' => str_replace('<br>', "\n", $posts[$random_post]->text),
+    'attachments' => _attachments($posts[$random_post]->attachments),
+    //'publish_date' => time() + (60*5),
+  );
+  $url = _url($method, $data);
+  $decode = _decode($url);
+  dsm($decode);
+}
+
+
+//формирует из аттачментов поста строку для загрузки в ВК
+function _attachments($atts) {
+  $output = array();
+  $types = array(
+    'photo' => 'pid',
+    'video' => 'vid',
+  );
+  if(sizeof($atts) > 0) {
+    foreach ($atts as $att) {
+      $type = $att->type;
+      $entity = $att->{$type};
+      $output[] = $type . $entity->owner_id . '_' . $entity->{$types[$type]};
+    }
+  }
+
+  return implode(',', $output);
+}

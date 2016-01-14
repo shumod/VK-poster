@@ -1,0 +1,105 @@
+<?php
+
+/*
+ * Implements hook_node_view().
+ */
+function vk_task_node_view($node, $view_mode, $langcode) {
+  if($node->type == 'post_from_where') {
+    $group_post_from_id = abs($node->content['field_post_from'][0]['#markup']);
+    $group_post_to_id = abs($node->content['field_post_to'][0]['#markup']);
+
+    $group_post_from_name = db_select('vk_group_info', 'vkgi')
+      ->fields('vkgi', array('name'))
+      ->condition('vkgi.group_id', $group_post_from_id)
+      ->execute()
+      ->fetchField();
+    $node->content['field_post_from'][0]['#markup'] = $group_post_from_name;
+
+    $group_post_to_name = db_select('vk_group_info', 'vkgi')
+      ->fields('vkgi', array('name'))
+      ->condition('vkgi.group_id', $group_post_to_id)
+      ->execute()
+      ->fetchField();
+    $node->content['field_post_to'][0]['#markup'] = $group_post_to_name;
+  }
+}
+
+/*
+ * Implements hook_node_presave().
+ */
+function vk_task_node_presave($node) {
+  if($node->type == 'post_from_where') {
+    dsm($node);
+    $group_post_from_id = abs($node->field_post_from['und'][0]['value']);
+    $group_post_to_id = abs($node->field_post_to['und'][0]['value']);
+
+    $groups = array($group_post_from_id, $group_post_to_id);
+
+    _refresh_groups_in_db($groups);
+  }
+}
+
+function _url($method, $data = array()) {
+  $url = '';
+  $path = 'https://api.vk.com/method/';
+  $data['access_token'] = _get_token();
+  $query = drupal_get_query_parameters($data);
+  $url = url($path . $method, array('query' => $query));
+
+  return $url;
+}
+
+//получить токен, который был сохранён заранее
+function _get_token() {
+  global $user;
+  $user = user_load($user->uid);
+  $user_wrapper = entity_metadata_wrapper('user', $user);
+  $user_id = $user_wrapper->field_user_id->value();
+  $token = $user_wrapper->field_token->value();
+
+  if($token == ''){
+    drupal_set_message('Сохраните токен для пользователя ' . l('тут!', 'user/'.$user->uid.'/token'));
+  }
+
+  return $token;
+}
+
+//функция обновляет название группы в базе данных, если его там до этого не было
+function _refresh_groups_in_db($group_ids = array()){
+  foreach ($group_ids as $group_id) {
+
+    //получаем имя нашей группы
+    $group_name = db_select('vk_group_info', 'vgi')
+      ->fields('vgi', array('name'))
+      ->condition('vgi.group_id', $group_id)
+      ->execute()
+      ->fetchField();    
+
+    //если такой группы нет в базе данных, то записываем имя и id группы
+    if($group_name == '') {
+      $data = array(
+        'group_id' => $group_id,
+      );
+      $url = _url('groups.getById', $data);
+      $response = _decode($url);
+      if(isset($response->response[0]->name)) {
+        $group_name = $response->response[0]->name;
+        $record = array(
+          'group_id' => $group_id,
+          'name' => $group_name,
+        );
+        db_insert('vk_group_info')
+          ->fields($record)
+          ->execute();
+        drupal_set_message('Название группы сохранено успешно!');
+      }
+      else {
+        drupal_set_message('Почему-то нет названия группы');
+      }
+    }
+    else{
+      drupal_set_message('Группа ' . $group_name . ' уже была добавлена в базу данных!');
+    }
+
+  }
+}

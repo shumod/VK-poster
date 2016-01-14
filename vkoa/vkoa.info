@@ -1,0 +1,5 @@
+name = VK Autorization
+description = Provide VK authorization
+core = 7.x
+package = Custom
+configure = admin/config/vkoa/configuration
